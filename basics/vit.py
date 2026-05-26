@@ -96,13 +96,19 @@ class ViT(nn.Module):
         )
         self.ln_f = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_all_tokens: bool = False) -> torch.Tensor:
         b = x.shape[0]
         x = self.patch_embed(x)
         cls = self.cls_token.expand(b, -1, -1)
         x = torch.cat([cls, x], dim=1)
         x = x + self.pos_embed
+
         for block in self.blocks:
             x = block(x)
+
         x = self.ln_f(x)
+
+        if return_all_tokens:
+            return x
+
         return x[:, 0, :]

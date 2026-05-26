@@ -60,7 +60,10 @@ class LoRALinear(nn.Module):
         # A.T: (d_in, rank)
         # B.T: (rank, d_out)
         # lora_out: (..., d_out)
-        lora_out = x @ self.A.T @ self.B.T
+        A = self.A.to(device=x.device, dtype=x.dtype)
+        B = self.B.to(device=x.device, dtype=x.dtype)
+
+        lora_out = x @ A.T @ B.T
 
         return base_out + self.scaling * lora_out
 
