@@ -11,7 +11,7 @@ import math
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class ProjectionHeads(nn.Module):
     """Two unbiased linear heads that project image and text embeddings into
@@ -31,14 +31,25 @@ class ProjectionHeads(nn.Module):
 
     def __init__(self, d_image: int, d_text: int, d_proj: int = 256) -> None:
         super().__init__()
-        # TODO: define self.image_proj, self.text_proj as nn.Linear(..., bias=False).
-        raise NotImplementedError
+        # Maps ViT image embeddings from d_image -> d_proj
+        # bias=False because CLIP-style projection heads usually use unbiased linear projections
+        self.image_proj = nn.Linear(d_image, d_proj, bias=False)
+
+        # Maps text encoder embeddings from d_text -> d_proj
+        self.text_proj = nn.Linear(d_text, d_proj, bias=False)
 
     def forward(
         self, image_embeds: torch.Tensor, text_embeds: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+        # Project both modalities into the same d_proj-dimensional space
+        image_proj = self.image_proj(image_embeds)
+        text_proj = self.text_proj(text_embeds)
 
+        # L2-normalize so dot products become cosine similarities
+        image_proj = F.normalize(image_proj, p=2, dim=-1)
+        text_proj = F.normalize(text_proj, p=2, dim=-1)
+
+        return image_proj, text_proj
 
 def init_logit_scale() -> nn.Parameter:
     """CLIP-style learnable temperature, initialized to ln(1/0.07)."""
@@ -70,5 +81,24 @@ def clip_loss(
     Returns:
         Scalar loss tensor.
     """
-    # TODO: implement.
-    raise NotImplementedError
+    batch_size = image_embeds.shape[0]
+
+    # Similarity matrix: each entry S[i, j] is image_i · text_j,
+    # scaled by learned inverse temperature exp(logit_scale).
+    logits = image_embeds @ text_embeds.T
+    logits = logits * logit_scale.exp()
+
+    # Correct pairs are on the diagonal:
+    # image 0 matches text 0, image 1 matches text 1, etc.
+    labels = torch.arange(batch_size, device=image_embeds.device)
+
+    # Image-to-text loss: each image should classify its matching caption.
+    loss_i2t = F.cross_entropy(logits, labels)
+
+    # Text-to-image loss: each caption should classify its matching image.
+    loss_t2i = F.cross_entropy(logits.T, labels)
+
+    # Symmetric CLIP loss averages both directions.
+    loss = 0.5 * (loss_i2t + loss_t2i)
+
+    return loss

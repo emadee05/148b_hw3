@@ -1,82 +1,96 @@
-"""Benchmark ViT forward pass wall time for several patch sizes P.
-
-Usage:
-  uv run python scripts/benchmark_vit_forward.py
-  uv run python scripts/benchmark_vit_forward.py --img-size 224 --patch-sizes 8,16,32
-"""
-
-from __future__ import annotations
-
-import argparse
-import statistics
 import time
-
 import torch
+import pandas as pd
 
 from basics.vit import ViT
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="ViT forward timing (CUDA).")
-    parser.add_argument("--img-size", type=int, default=224, help="Square image side length.")
-    parser.add_argument(
-        "--patch-sizes",
-        type=str,
-        default="8,16,32",
-        help="Comma-separated patch sizes P (must divide img-size).",
+def make_vit(patch_size):
+    return ViT(
+        img_size=224,
+        patch_size=patch_size,
+        d_model=384,
+        num_heads=6,
+        num_blocks=6,
+        dropout=0.1,
     )
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--d-model", type=int, default=384)
-    parser.add_argument("--num-heads", type=int, default=6)
-    parser.add_argument("--num-blocks", type=int, default=6)
-    parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--steps", type=int, default=20)
-    args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA is required for torch.cuda.synchronize() timing.")
 
-    device = torch.device("cuda")
-    patch_sizes = [int(p.strip()) for p in args.patch_sizes.split(",") if p.strip()]
+def benchmark_patch_size(patch_size, device):
+    batch_size = 16
+    image_size = 224
+    warmup_steps = 5
+    timed_steps = 20
 
-    for p in patch_sizes:
-        if args.img_size % p != 0:
-            raise SystemExit(f"img_size {args.img_size} must be divisible by P={p}")
+    model = make_vit(patch_size).to(device)
+    model.eval()
 
-        model = ViT(
-            img_size=args.img_size,
-            patch_size=p,
-            d_model=args.d_model,
-            num_heads=args.num_heads,
-            num_blocks=args.num_blocks,
-            dropout=args.dropout,
-        ).to(device)
-        model.eval()
+    x = torch.randn(batch_size, 3, image_size, image_size, device=device)
 
-        x = torch.randn(
-            args.batch_size, 3, args.img_size, args.img_size, device=device
+    # Warmup steps
+    with torch.no_grad():
+        for _ in range(warmup_steps):
+            _ = model(x)
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    times_ms = []
+
+    # Timed steps
+    with torch.no_grad():
+        for _ in range(timed_steps):
+            if device == "cuda":
+                torch.cuda.synchronize()
+
+            start = time.perf_counter()
+            _ = model(x)
+
+            if device == "cuda":
+                torch.cuda.synchronize()
+
+            end = time.perf_counter()
+
+            times_ms.append((end - start) * 1000)
+
+    times_tensor = torch.tensor(times_ms)
+    num_patches = (image_size // patch_size) ** 2
+
+    return {
+        "patch_size": patch_size,
+        "num_patches": num_patches,
+        "mean_ms": times_tensor.mean().item(),
+        "std_ms": times_tensor.std(unbiased=True).item(),
+    }
+
+
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    results = []
+
+    for patch_size in [8, 16, 32]:
+        print(f"\nBenchmarking patch size P={patch_size}...")
+        result = benchmark_patch_size(patch_size, device)
+        results.append(result)
+
+        print(
+            f"P={result['patch_size']}, "
+            f"N={result['num_patches']}, "
+            f"time={result['mean_ms']:.3f} ± {result['std_ms']:.3f} ms"
         )
 
-        with torch.inference_mode():
-            for _ in range(args.warmup):
-                _ = model(x)
-            torch.cuda.synchronize()
+    df = pd.DataFrame(results)
 
-            times_ms: list[float] = []
-            for _ in range(args.steps):
-                torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                _ = model(x)
-                torch.cuda.synchronize()
-                times_ms.append((time.perf_counter() - t0) * 1000.0)
+    print("\nResults:")
+    print(df.to_string(index=False))
 
-        mean_ms = statistics.mean(times_ms)
-        stdev_ms = statistics.stdev(times_ms) if len(times_ms) > 1 else 0.0
-        n_patches = (args.img_size // p) ** 2
+    print("\nLaTeX table rows:")
+    for r in results:
         print(
-            f"P={p:3d}  seq_len={n_patches + 1:4d}  "
-            f"mean={mean_ms:.3f} ms  stdev={stdev_ms:.3f} ms  (batch={args.batch_size})"
+            f"{r['patch_size']} & {r['num_patches']} & "
+            f"${r['mean_ms']:.3f} \\pm {r['std_ms']:.3f}$ ms \\\\"
         )
 
 
