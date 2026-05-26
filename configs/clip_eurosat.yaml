@@ -1,5 +1,5 @@
 # §3 — CLIP-style pretraining on EuroSAT.
-# Recommended starting hyperparameters; tune as needed.
+# Train/val/test = 80/10/10 stratified split (see vlm/data.build_eurosat_loaders).
 
 vit:
   img_size: 64
@@ -29,7 +29,5 @@ train:
   log_every: 50
   eval_every_epoch: 1
 
-split:
-  train: "train[:80%]"
-  val: "train[80%:90%]"
-  test: "train[90%:]"
+# Legacy HF split strings (unused); loaders use stratified 80/10/10 in vlm/data.py.
+seed: 42
