@@ -67,7 +67,11 @@ def train_one_epoch(
 
         image_embeds = vit(images)
         with torch.no_grad():
-            text_embeds = text_encoder(list(captions)).to(device)
+            text_embeds = text_encoder(list(captions))
+
+        # FrozenTextEncoder may return an inference tensor; clone/detach makes it
+        # safe to pass through the trainable projection head during backprop.
+        text_embeds = text_embeds.clone().detach().to(device)
 
         image_proj, text_proj = projection_heads(image_embeds, text_embeds)
         loss = clip_loss(image_proj, text_proj, logit_scale)
@@ -181,8 +185,8 @@ def main() -> None:
         d_proj=d_proj,
     ).to(device)
 
-    logit_scale = init_logit_scale().to(device)
-
+    logit_scale = init_logit_scale()
+    logit_scale.data = logit_scale.data.to(device)
     optimizer = torch.optim.AdamW(
         list(vit.parameters())
         + list(projection_heads.parameters())

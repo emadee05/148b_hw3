@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from basics.model import Head
 
 
 class LoRALinear(nn.Module):
@@ -35,14 +36,34 @@ class LoRALinear(nn.Module):
         self.scaling = alpha / rank
         self.base_layer = base_layer
 
-        # TODO: freeze base_layer's parameters.
-        # TODO: create self.A (nn.Parameter, shape (rank, d_in), kaiming-uniform init).
-        # TODO: create self.B (nn.Parameter, shape (d_out, rank), zero init).
-        raise NotImplementedError
+        # Freeze the original linear layer.
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+
+        d_in = base_layer.in_features
+        d_out = base_layer.out_features
+
+        # LoRA matrices.
+        # A maps d_in -> rank.
+        # B maps rank -> d_out.
+        self.A = nn.Parameter(torch.empty(rank, d_in))
+        self.B = nn.Parameter(torch.zeros(d_out, rank))
+
+        # Initialize A with Kaiming-uniform.
+        nn.init.kaiming_uniform_(self.A, a=5**0.5)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: return base_layer(x) + scaling * (x @ A.T @ B.T)
-        raise NotImplementedError
+        base_out = self.base_layer(x)
+
+        # return base_layer(x) + scaling * (x @ A.T @ B.T)
+        # x: (..., d_in)
+        # A.T: (d_in, rank)
+        # B.T: (rank, d_out)
+        # lora_out: (..., d_out)
+        lora_out = x @ self.A.T @ self.B.T
+
+        return base_out + self.scaling * lora_out
+
 
 
 def apply_lora_to_attention(model: nn.Module, rank: int, alpha: float) -> nn.Module:
@@ -61,7 +82,15 @@ def apply_lora_to_attention(model: nn.Module, rank: int, alpha: float) -> nn.Mod
                (e.g., a ViT).
         rank, alpha: Forwarded to LoRALinear.
     """
-    # TODO: implement.
     # Hint: iterate model.named_modules(), check isinstance(m, Head), and
     # set m.q_proj = LoRALinear(m.q_proj, rank, alpha) (and same for v_proj).
-    raise NotImplementedError
+    
+    """Replace q_proj and v_proj linear layers inside every Head with LoRA."""
+    for p in model.parameters():
+        p.requires_grad = False
+
+    for module in model.modules():
+        if isinstance(module, Head):
+            module.q_proj = LoRALinear(module.q_proj, rank=rank, alpha=alpha)
+            module.v_proj = LoRALinear(module.v_proj, rank=rank, alpha=alpha)
+    return model
