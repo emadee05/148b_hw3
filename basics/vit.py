@@ -8,8 +8,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from basics.model import Block
-from basics.rope import RoPE1D
+from basics.model import Block, Head
+from basics.rope import RoPE1D, RoPE2D
 
 
 class PatchEmbeddings(nn.Module):
@@ -90,6 +90,75 @@ def _apply_rope_to_attention_heads(model: nn.Module, head_dim: int, seq_len: int
 
         module.forward = rope_forward.__get__(module, module.__class__)
 
+def _apply_rope2d_to_attention_heads(
+    model: nn.Module,
+    head_dim: int,
+    grid_size: int,
+) -> None:
+    """
+    Attach RoPE2D modules to every basics.model.Head and patch its forward.
+
+    Sequence layout:
+      token 0 = CLS token
+      tokens 1...N = image patches in flattened row-major order
+
+    For CLS, we assign coordinate (0, 0).
+    For patch i, coordinates are:
+      x = column index
+      y = row index
+    """
+
+    for module in model.modules():
+        if not isinstance(module, Head):
+            continue
+
+        module.rope2d = RoPE2D(head_dim=head_dim, grid_size=grid_size)
+
+        def rope2d_forward(self, x: torch.Tensor):
+            B, T, C_in = x.shape
+
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+
+            head_dim = q.shape[-1]
+
+            # Build 2D coordinates for [CLS] + flattened patches.
+            # CLS gets (0, 0).
+            num_patch_tokens = T - 1
+            grid = int(num_patch_tokens ** 0.5)
+
+            patch_ids = torch.arange(num_patch_tokens, device=x.device)
+            y_patch = patch_ids // grid
+            x_patch = patch_ids % grid
+
+            x_coords = torch.cat(
+                [torch.zeros(1, dtype=torch.long, device=x.device), x_patch.long()],
+                dim=0,
+            )
+            y_coords = torch.cat(
+                [torch.zeros(1, dtype=torch.long, device=x.device), y_patch.long()],
+                dim=0,
+            )
+
+            q = q.unsqueeze(1)  # (B, 1, T, head_dim)
+            k = k.unsqueeze(1)
+
+            q = self.rope2d(q, x_coords=x_coords, y_coords=y_coords).squeeze(1)
+            k = self.rope2d(k, x_coords=x_coords, y_coords=y_coords).squeeze(1)
+
+            wei = q @ k.transpose(-2, -1) * (head_dim ** -0.5)
+
+            if hasattr(self, "tril"):
+                wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+
+            wei = torch.softmax(wei, dim=-1)
+            wei = self.dropout(wei)
+
+            out = wei @ v
+            return out
+
+        module.forward = rope2d_forward.__get__(module, module.__class__)
 
 class ViT(nn.Module):
     """Vision Transformer.
@@ -150,7 +219,14 @@ class ViT(nn.Module):
         if pos_encoding == "rope":
             head_dim = d_model // num_heads
             _apply_rope_to_attention_heads(self, head_dim=head_dim, seq_len=seq_len)
-
+        elif pos_encoding == "rope2d":
+            head_dim = d_model // num_heads
+            grid_size = img_size // patch_size
+            _apply_rope2d_to_attention_heads(
+                self,
+                head_dim=head_dim,
+                grid_size=grid_size,
+            )
         self.ln_f = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, return_all_tokens: bool = False) -> torch.Tensor:

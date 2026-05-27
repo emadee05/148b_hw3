@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, default=Path("runs/clip_eurosat"))
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--wandb", action="store_true", help="Log to W&B")
-    p.add_argument("--pos-encoding", choices=["learned", "rope"], default="learned")
+    p.add_argument("--pos-encoding", choices=["learned", "rope", "rope2d"], default="learned")    
     p.add_argument("--eval-img-size", type=int, default=None)
     p.add_argument("--eval-only", action="store_true")
     p.add_argument("--checkpoint", type=Path, default=None)
