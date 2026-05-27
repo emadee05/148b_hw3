@@ -51,7 +51,6 @@ class RoPE1D(nn.Module):
         self.register_buffer("cos_cached", freqs.cos(), persistent=False)
         self.register_buffer("sin_cached", freqs.sin(), persistent=False)
 
-        raise NotImplementedError
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # TODO: implement.

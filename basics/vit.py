@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from basics.model import Block
+from basics.rope import RoPE1D
 
 
 class PatchEmbeddings(nn.Module):
@@ -43,6 +44,52 @@ class PatchEmbeddings(nn.Module):
         x = x.flatten(2).transpose(1, 2)
         return x
 
+def _apply_rope_to_attention_heads(model: nn.Module, head_dim: int, seq_len: int) -> None:
+    """
+    Attach RoPE1D modules to every basics.model.Head and patch its forward.
+
+    This assumes each Head has:
+      q_proj, k_proj, v_proj, dropout
+    like your existing basics.model.Head implementation.
+    """
+    from basics.model import Head
+
+    for module in model.modules():
+        if not isinstance(module, Head):
+            continue
+
+        module.rope = RoPE1D(head_dim=head_dim, max_seq_len=seq_len)
+
+        def rope_forward(self, x: torch.Tensor):
+            B, T, C = x.shape
+
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+
+            # Convert to fake num_heads=1 shape for RoPE1D:
+            # (B, 1, T, head_dim)
+            q = q.unsqueeze(1)
+            k = k.unsqueeze(1)
+
+            positions = torch.arange(T, device=x.device)
+            q = self.rope(q, positions).squeeze(1)
+            k = self.rope(k, positions).squeeze(1)
+
+            wei = q @ k.transpose(-2, -1) * (C ** -0.5)
+
+            # Preserve the existing behavior for encoder heads.
+            if hasattr(self, "tril"):
+                wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+
+            wei = torch.softmax(wei, dim=-1)
+            wei = self.dropout(wei)
+
+            out = wei @ v
+            return out
+
+        module.forward = rope_forward.__get__(module, module.__class__)
+
 
 class ViT(nn.Module):
     """Vision Transformer.
@@ -71,6 +118,7 @@ class ViT(nn.Module):
         num_heads: int,
         num_blocks: int,
         dropout: float = 0.1,
+        pos_encoding: str="learned",
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -80,7 +128,11 @@ class ViT(nn.Module):
 
         self.patch_embed = PatchEmbeddings(img_size, patch_size, d_model)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, d_model))
+        self.pos_encoding = pos_encoding
+        if pos_encoding == "learned":
+          self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, d_model))
+        else:
+          self.pos_embed = None
 
         self.blocks = nn.ModuleList(
             [
@@ -95,13 +147,21 @@ class ViT(nn.Module):
             ]
         )
         self.ln_f = nn.LayerNorm(d_model)
+        if pos_encoding == "rope":
+            head_dim = d_model // num_heads
+            _apply_rope_to_attention_heads(self, head_dim=head_dim, seq_len=seq_len)
+
+        self.ln_f = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, return_all_tokens: bool = False) -> torch.Tensor:
         b = x.shape[0]
         x = self.patch_embed(x)
         cls = self.cls_token.expand(b, -1, -1)
         x = torch.cat([cls, x], dim=1)
-        x = x + self.pos_embed
+
+        if self.pos_encoding=="learned":
+          x = x + self.pos_embed
+
 
         for block in self.blocks:
             x = block(x)
